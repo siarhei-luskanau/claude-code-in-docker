@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+command -v docker >/dev/null 2>&1 || die "docker not found. Install Docker Desktop first."
+docker info >/dev/null 2>&1 || die "Docker is not running. Start Docker Desktop and try again."
+
+ENV_FILE="$SCRIPT_DIR/.env"
+[ -f "$ENV_FILE" ] || die "Missing $ENV_FILE
+Create it from the example:
+  cp '$SCRIPT_DIR/.env.example' '$ENV_FILE' && chmod 600 '$ENV_FILE'
+Then run 'claude setup-token' on the host and paste the token into it."
+
+set -a
+source "$ENV_FILE"
+set +a
+[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || die "CLAUDE_CODE_OAUTH_TOKEN is empty in $ENV_FILE
+Run 'claude setup-token' on the host (macOS) and paste the token into $ENV_FILE."
+
+BASE="$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')"
+[ -n "$BASE" ] || BASE="project"
+PROJECT_ID="$BASE-$(pwd | shasum | cut -c1-8)"
+
+export CLAUDE_DOCKER_HOME="$SCRIPT_DIR"
+export PROJECT_DIR="$PWD"
+export PROJECT_STATE_DIR="$SCRIPT_DIR/state/$PROJECT_ID"
+export CLAUDE_DOCKER_UPDATE=0
+
+if [ "${1:-}" = "--reset" ]; then
+  [ -d "$PROJECT_STATE_DIR" ] || die "No state to reset for this project ($PROJECT_STATE_DIR does not exist)."
+  printf "Delete container state for %s (%s)? [y/N] " "$(basename "$PWD")" "$PROJECT_ID"
+  read -r answer
+  [ "$answer" = "y" ] || [ "$answer" = "Y" ] || { echo "Aborted."; exit 0; }
+  rm -rf "$PROJECT_STATE_DIR"
+  echo "State deleted. The next launch re-seeds from claude.json.template."
+  exit 0
+fi
+
+mkdir -p "$PROJECT_STATE_DIR/claude" \
+         "$SCRIPT_DIR/tools" \
+         "$SCRIPT_DIR/apt-cache/archives" \
+         "$SCRIPT_DIR/apt-cache/lists"
+[ -f "$PROJECT_STATE_DIR/claude.json" ] || cp "$SCRIPT_DIR/claude.json.template" "$PROJECT_STATE_DIR/claude.json"
+
+mkdir -p "$HOME/.claude/commands" "$HOME/.claude/agents"
+[ -f "$HOME/.claude/CLAUDE.md" ] || touch "$HOME/.claude/CLAUDE.md"
+[ -f "$HOME/.claude/settings.json" ] || echo '{}' > "$HOME/.claude/settings.json"
+[ -f "$HOME/.gitconfig" ] || touch "$HOME/.gitconfig"
+
+if [ "${1:-}" = "--update" ]; then
+  export CLAUDE_DOCKER_UPDATE=1
+  shift
+  exec docker compose --env-file "$ENV_FILE" -f "$SCRIPT_DIR/docker-compose.yml" \
+    -p "claude-$PROJECT_ID" run --rm claude
+fi
+
+if [ ! -x "$SCRIPT_DIR/tools/bin/claude" ]; then
+  echo "First run: installing system packages and Claude Code inside the container."
+  echo "This may take a minute; later launches start in seconds."
+fi
+
+exec docker compose --env-file "$ENV_FILE" -f "$SCRIPT_DIR/docker-compose.yml" \
+  -p "claude-$PROJECT_ID" run --rm claude "$@"
