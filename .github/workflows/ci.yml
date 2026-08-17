@@ -37,5 +37,8 @@ jobs:
       - name: Validate docker-compose config
         run: |
           cp .env.example .env
+          export PROJECT_DIR="$PWD"
+          export CLAUDE_DOCKER_HOME="$PWD"
+          export PROJECT_STATE_DIR="$PWD/state/ci"
           docker compose config --quiet
           rm .env
